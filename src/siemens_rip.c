@@ -53,6 +53,21 @@ uint8_t *load_ff_file(const char *path, size_t *size) {
     return buffer;
 }
 
+int detect_platform(const uint8_t *buffer, size_t size) {
+    uint8_t sig[] = {0x68, 0x77, 0x5F, 0x64, 0x65, 0xF4};
+    uint8_t *found = memmem(buffer, size, sig, sizeof(sig));
+    if (!found || found - buffer - 2 < 0) return -1;
+    uint8_t byte = *(found - 2);
+    if (byte == 0xDA) {
+        return 0;
+    } else if (byte == 0x26) {
+        return 1;
+    } else if (byte == 0xAE) {
+        return 2;
+    }
+    return -1;
+}
+
 void write_png(const uint8_t *pixels, int width, int height, int type, int id) {
     char *path = malloc(PATH_MAX - strlen(OUT_DIR) - 8);
     sprintf(path, "%s//%d.png", OUT_DIR, id);
@@ -169,7 +184,21 @@ int main(int argc, char *argv[]) {
     if (buffer) {
         put_file_name(OUT_DIR, path);
         if (create_dir(OUT_DIR)) {
-            rip(buffer, size, 1);
+            const int platform = detect_platform(buffer, size);
+            if (platform == -1) {
+                fprintf(stderr, "Error: could not detect platform!\n");
+            } else {
+                char platform_name[8];
+                if (platform == 0) {
+                    strcpy(platform_name, "SG");
+                } else if (platform == 1) {
+                    strcpy(platform_name, "NSG");
+                } else {
+                    strcpy(platform_name, "ELKA");
+                }
+                fprintf(stdout, "Detect %s platform\n", platform_name);
+                rip(buffer, size, platform);
+            }
         } else {
             fprintf(stderr, "Error: could not create directory %s\n", OUT_DIR);
         }
