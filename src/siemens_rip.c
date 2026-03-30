@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include <limits.h>
 #include <string.h>
+#include <libgen.h>
 #include <sys/stat.h>
 #include <libsimg.h>
 
@@ -33,7 +34,7 @@ typedef struct {
 #define SIMG_CLASSIC_OFFSET_BITMAP 4
 #define SIMG_ELKA_OFFSET_BITMAP 8
 
-char OUT_DIR[256];
+int VERBOSE;
 
 uint8_t *load_ff_file(const char *path, size_t *size) {
     uint8_t *buffer = NULL;
@@ -45,7 +46,10 @@ uint8_t *load_ff_file(const char *path, size_t *size) {
             fseek(ff, 0, SEEK_SET);
             buffer = malloc(*size);
             if (buffer) {
-                fread(buffer, 1, *size, ff);
+                if (fread(buffer, 1, *size, ff) != *size) {
+                    free(buffer);
+                    buffer = NULL;
+                }
             }
         }
         fclose(ff);
@@ -53,14 +57,13 @@ uint8_t *load_ff_file(const char *path, size_t *size) {
     return buffer;
 }
 
-void write_png(const uint8_t *pixels, int width, int height, int type, int id) {
-    char *path = malloc(PATH_MAX - strlen(OUT_DIR) - 8);
-    sprintf(path, "%s//%d.png", OUT_DIR, id);
+void write_png(const char *dir_name, const uint8_t *pixels, int width, int height, int type, int id) {
+    char path[PATH_MAX + 1];
+    snprintf(path, sizeof(path), "%s/%d.png", dir_name, id);
     simg_write_png(path, pixels, width, height, type);
-    free(path);
 }
 
-void rip(const uint8_t *buffer, size_t size) {
+void rip(const char *dir_name, const uint8_t *buffer, size_t size) {
     int platform = -1;
     uint8_t *imghdr = simg_find_pit(buffer, size, &platform);
     if (imghdr) {
@@ -84,12 +87,13 @@ void rip(const uint8_t *buffer, size_t size) {
                 simg.height = simg_elka->height;
                 simg.type = simg_elka->type;
             }
-
+            if (simg.width == 0 || simg.height == 0) {
+                break;
+            }
             uint32_t bitmap_offset = simg_addr_to_offset(addr + offset_bitmap);
             if (!bitmap_offset) {
                 break;
             }
-
             const int bpp = simg_get_bpp_by_type(simg.type);
             if (!bpp) {
                 break;
@@ -100,12 +104,15 @@ void rip(const uint8_t *buffer, size_t size) {
                 if (!pixels) {
                     break;
                 }
-                write_png(pixels, simg.width, simg.height, simg.type, i);
+                write_png(dir_name, pixels, simg.width, simg.height, simg.type, i);
             } else {
-                write_png(buffer + bitmap_offset, simg.width, simg.height, simg.type, i);
+                write_png(dir_name, buffer + bitmap_offset, simg.width, simg.height, simg.type, i);
             }
             if (pixels) {
                 free(pixels);
+            }
+            if (VERBOSE) {
+                fprintf(stdout, "Extracted %d: %dx%d (bpp=%d)\n", i, simg.width, simg.height, bpp);
             }
 
             const uint32_t imghdr_offset = (platform <= 1) ? sizeof(SIMG_CLASSIC) : sizeof(SIMG_ELKA);
@@ -124,15 +131,16 @@ void rip(const uint8_t *buffer, size_t size) {
     }
 }
 
-void put_file_name(char *dest, const char *path) {
-    if (!dest || !path) {
+void get_dir_name(char *dest, const char *basename) {
+    if (!dest || !basename) {
         return;
     }
-    const char *s = strrchr(path, '/');
-    s = (s) ? s + 1 : path;
-    const char *e = strrchr(s, '.');
-    size_t len = (e) ? e - s : strlen(s);
-    strncpy(dest, s, len);
+    const char *e = strrchr(basename, '.');
+    size_t len = (e) ? e - basename : strlen(basename);
+    if (len > PATH_MAX) {
+        len = PATH_MAX;
+    }
+    strncpy(dest, basename, len);
     dest[len] = '\0';
 }
 
@@ -145,16 +153,20 @@ int create_dir(const char *path) {
 int main(int argc, char *argv[]) {
     int opt;
     static struct option long_options[] = {
-        // {"verbose", no_argument, 0, 'v'},
+        {"verbose", no_argument, 0, 'v'},
         {"help", no_argument, 0, 'h'},
         {0, 0, 0, 0}
     };
     // ReSharper disable once CppDFALoopConditionNotUpdated
-    while ((opt = getopt_long(argc, argv, "h", long_options, NULL)) != -1) {
+
+    while ((opt = getopt_long(argc, argv, "vh", long_options, NULL)) != -1) {
         switch (opt) {
-            // case 'v': verbose = 1; break;
+            case 'v': VERBOSE = 1; break;
             case 'h':
-                printf("Usage: %s [options] <fullflash.bin>\n", argv[0]);
+                printf("Usage: %s [options] <fullflash.bin>\n", basename(argv[0]));
+                printf("Options:\n");
+                printf("  -v, --verbose   enable verbose output\n");
+                printf("  -h, --help      show this help\n");
                 return 0;
             default: return 1;
         }
@@ -163,22 +175,31 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "Error: fullflash file required\n");
         return 1;
     }
-    const char *path = argv[optind];
+    if (strlen(argv[optind]) >= PATH_MAX) {
+        fprintf(stderr, "Error: fullflash file name too long\n");
+        return 1;
+    }
+
+    char ff_path[PATH_MAX + 1], dir_name[PATH_MAX + 1];
+    snprintf(ff_path, sizeof(ff_path), "%s", argv[optind]);
+    const char *ff_name = strrchr(ff_path, '/');
+    ff_name = ff_name ? ff_name + 1 : ff_path;
 
     size_t size;
-    uint8_t *buffer = load_ff_file(path, &size);
+    uint8_t *buffer = load_ff_file(ff_path, &size);
     if (buffer) {
-        put_file_name(OUT_DIR, path);
-        if (create_dir(OUT_DIR)) {
-            rip(buffer, size);
+        get_dir_name(dir_name, ff_name);
+        if (create_dir(dir_name)) {
+            rip(dir_name, buffer, size);
         } else {
-            fprintf(stderr, "Error: could not create directory %s\n", OUT_DIR);
+            fprintf(stderr, "Error: could not create directory %s\n", dir_name);
+            free(buffer);
+            return 1;
         }
         free(buffer);
     } else {
         fprintf(stderr, "Error: could not load fullflash file\n");
+        return 1;
     }
-
-
     return 0;
 }
